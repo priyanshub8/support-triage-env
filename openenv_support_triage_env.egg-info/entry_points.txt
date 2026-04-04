@@ -1,0 +1,2 @@
+[console_scripts]
+server = support_triage_env.server.app:main

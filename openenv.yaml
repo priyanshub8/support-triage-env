@@ -1,0 +1,10 @@
+spec_version: 1
+name: support_triage_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+description: >
+  Simulated helpdesk triage with graded easy/medium/hard tasks: routing, priority,
+  policy-aware replies, and disposition. Partial progress rewards plus deterministic
+  agent graders (0.0–1.0).
