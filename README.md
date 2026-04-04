@@ -2,7 +2,7 @@
 title: Support Triage OpenEnv
 emoji: 🎧
 colorFrom: indigo
-colorTo: emerald
+colorTo: green
 sdk: docker
 tags:
   - openenv
