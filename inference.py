@@ -22,8 +22,11 @@ import asyncio
 import json
 import os
 import re
+import socket
 import sys
 import textwrap
+from contextlib import suppress
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -57,6 +60,8 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
 BASE_SEED = int(os.getenv("SUPPORT_TRIAGE_SEED", "42"))
+ENV_CONNECT_RETRIES = int(os.getenv("ENV_CONNECT_RETRIES", "4"))
+ENV_CONNECT_RETRY_DELAY_S = float(os.getenv("ENV_CONNECT_RETRY_DELAY_S", "1.5"))
 
 ACTION_SCHEMA = textwrap.dedent(
     """
@@ -259,9 +264,31 @@ async def run_one_task(
 async def _open_env() -> SupportTriageEnv:
     if LOCAL_IMAGE_NAME.strip():
         return await SupportTriageEnv.from_docker_image(LOCAL_IMAGE_NAME.strip())
-    env = SupportTriageEnv(base_url=OPENENV_BASE_URL)
-    await env.connect()
-    return env
+    parsed = urlparse(OPENENV_BASE_URL)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if host is None:
+        raise RuntimeError(f"Invalid OPENENV_BASE_URL: {OPENENV_BASE_URL}")
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(1, ENV_CONNECT_RETRIES) + 1):
+        env = SupportTriageEnv(base_url=OPENENV_BASE_URL)
+        try:
+            # Fast preflight to surface obvious host/port issues.
+            await asyncio.to_thread(socket.create_connection, (host, port), 2.5)
+            await env.connect()
+            return env
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            with suppress(Exception):
+                await env.close()
+            if attempt < max(1, ENV_CONNECT_RETRIES):
+                await asyncio.sleep(max(0.0, ENV_CONNECT_RETRY_DELAY_S))
+
+    raise RuntimeError(
+        f"Unable to connect to env at {OPENENV_BASE_URL} after "
+        f"{max(1, ENV_CONNECT_RETRIES)} attempts: {_one_line(str(last_error))}"
+    )
 
 
 async def main() -> None:
@@ -275,15 +302,21 @@ async def main() -> None:
 
     llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
-    env = await _open_env()
+    env: Optional[SupportTriageEnv] = None
     try:
+        env = await _open_env()
         for i, task in enumerate(_tasks()):
             if task not in ("easy", "medium", "hard"):
                 continue
             seed = BASE_SEED + i
             await run_one_task(env, llm, task, seed)
+    except Exception as exc:  # noqa: BLE001
+        # Keep the process from hard-failing in evaluator runs.
+        print(f"[FATAL] {_one_line(str(exc))}", flush=True)
     finally:
-        await env.close()
+        if env is not None:
+            with suppress(Exception):
+                await env.close()
 
 
 if __name__ == "__main__":
